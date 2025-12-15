@@ -1,0 +1,9 @@
+streamlit
+yfinance
+sentence-transformers
+torch
+nltk
+requests
+beautifulsoup4
+pandas
+numpy
