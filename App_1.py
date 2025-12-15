@@ -14,7 +14,7 @@ sia = SentimentIntensityAnalyzer()
 
 st.set_page_config(page_title="Indian Stock Predictor", page_icon="📈", layout="centered")
 
-# Custom CSS for beauty
+# Custom CSS
 st.markdown("""
 <style>
     .big-font {font-size:50px !important; font-weight:bold; text-align:center;}
@@ -26,15 +26,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📈 Indian Stock Movement Predictor")
-st.markdown("**Real-time market + Your live GitHub news + Historical patterns**")
+st.markdown("**Real-time market + Your private GitHub news feed + Historical patterns**")
 
-# Load embedding model
 @st.cache_resource
 def load_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
 embedder = load_model()
 
-# Load historical data
 @st.cache_data
 def load_historical():
     df = pd.read_csv("IndianFinancialNews.csv")
@@ -46,21 +44,28 @@ def load_historical():
 
 df_hist, hist_embeddings = load_historical()
 
-# Load recent news from your GitHub
-@st.cache_data(ttl=1800)  # Refresh every 30 minutes
+# Load recent news from PRIVATE GitHub repo using token from secrets
+@st.cache_data(ttl=1800)
 def load_recent_news_from_github():
+    token = st.secrets.get("GITHUB_TOKEN")
+    if not token:
+        st.error("GITHUB_TOKEN not found in secrets! Add it in app settings.")
+        return pd.DataFrame()
+    
+    headers = {'Authorization': f'token {token}'}
     folder_url = "https://api.github.com/repos/aarshrana007/Stock_Analysis/contents/news_data"
+    
     try:
-        response = requests.get(folder_url)
+        response = requests.get(folder_url, headers=headers)
         if response.status_code != 200:
-            st.warning("Could not access GitHub recent news folder.")
+            st.warning(f"GitHub access failed: {response.status_code}. Check token permissions.")
             return pd.DataFrame()
         
         file_list = response.json()
         dfs = []
         for file in file_list:
             if file['name'].endswith('.csv'):
-                csv_data = requests.get(file['download_url']).text
+                csv_data = requests.get(file['download_url'], headers=headers).text
                 df = pd.read_csv(StringIO(csv_data))
                 if not df.empty:
                     df['Description'] = (df.get('title', '') + " " + df.get('summary', '')).str.strip()
@@ -74,22 +79,22 @@ def load_recent_news_from_github():
             recent_df = recent_df.dropna(subset=['date'])
             return recent_df[['Description', 'title', 'link', 'date', 'source']]
     except Exception as e:
-        st.error(f"Error loading recent news: {e}")
+        st.error(f"Error loading news: {e}")
     return pd.DataFrame()
 
 recent_news_df = load_recent_news_from_github()
 
-# Combine embeddings
+# Combine
 if not recent_news_df.empty:
     recent_emb = embedder.encode(recent_news_df['Description'].tolist(), batch_size=64)
     recent_emb = np.array(recent_emb).astype('float32')
     embeddings = np.vstack([hist_embeddings, recent_emb])
     df_combined = pd.concat([df_hist, recent_news_df[['Description', 'date']]], ignore_index=True)
-    st.success(f"Loaded {len(recent_news_df)} recent news items from your GitHub!")
+    st.success(f"Loaded {len(recent_news_df)} recent news items from your private repo!")
 else:
     embeddings = hist_embeddings
     df_combined = df_hist
-    st.info("Using historical data only (no recent GitHub news)")
+    st.info("Using historical data only")
 
 # Real-Time Market Snapshot
 st.subheader("📊 Real-Time Market Snapshot")
@@ -114,25 +119,23 @@ with col2:
     st.markdown(f"<div class='market-box' style='background-color:{color}'>"
                 f"<h3>Sensex</h3><h2>{s_price}</h2><p>{s_change:+.2f}%</p></div>", unsafe_allow_html=True)
 
-# Top 10 Latest News from GitHub
-st.subheader("📰 Top 10 Latest Financial News (Your GitHub Feed)")
+# Top 10 Latest News
+st.subheader("📰 Top 10 Latest Financial News (Your Private Feed)")
 if not recent_news_df.empty:
     latest = recent_news_df.sort_values(by='date', ascending=False).head(10)
     for _, row in latest.iterrows():
         st.markdown(f"<div class='news-item'><strong>{row['date']}</strong>: {row['Description']}</div>", unsafe_allow_html=True)
 else:
-    st.info("No recent news from GitHub")
+    st.info("No recent news loaded")
 
 st.markdown("---")
 
-# Stock Predictor
-st.markdown("### 🔮 Predict Any NSE Stock")
-stock = st.text_input("Enter Stock Symbol", value="RELIANCE", placeholder="e.g., SBI, TCS").upper().strip()
+# Predictor (same as before)
+stock = st.text_input("Enter Stock Symbol", value="RELIANCE").upper().strip()
 
 if st.button("Predict 5-Day Movement", type="primary"):
     ticker = f"{stock}.NS"
     with st.spinner("Analyzing..."):
-        # Use recent news for sentiment
         if not recent_news_df.empty:
             news_texts = recent_news_df['Description'].tolist()
         else:
@@ -171,4 +174,4 @@ if st.button("Predict 5-Day Movement", type="primary"):
                     f'<h2>Expected 5-day move for {stock}</h2>'
                     f'<p><strong>Confidence: {confidence}%</strong></p></div>', unsafe_allow_html=True)
 
-st.caption("Your live GitHub news feed + Historical data + AI prediction")
+st.caption("Your private GitHub news feed + Historical data + AI prediction")
