@@ -1,1 +1,107 @@
-{"metadata":{"kernelspec":{"language":"python","display_name":"Python 3","name":"python3"},"language_info":{"name":"python","version":"3.11.13","mimetype":"text/x-python","codemirror_mode":{"name":"ipython","version":3},"pygments_lexer":"ipython3","nbconvert_exporter":"python","file_extension":".py"},"kaggle":{"accelerator":"none","dataSources":[{"sourceId":1189863,"sourceType":"datasetVersion","datasetId":676970}],"dockerImageVersionId":31192,"isInternetEnabled":true,"language":"python","sourceType":"script","isGpuEnabled":false}},"nbformat_minor":4,"nbformat":4,"cells":[{"cell_type":"code","source":"cc# %% [code] {\"execution\":{\"iopub.status.busy\":\"2025-12-15T10:51:15.050235Z\",\"iopub.execute_input\":\"2025-12-15T10:51:15.050522Z\",\"iopub.status.idle\":\"2025-12-15T10:51:15.058356Z\",\"shell.execute_reply.started\":\"2025-12-15T10:51:15.050500Z\",\"shell.execute_reply\":\"2025-12-15T10:51:15.057200Z\"},\"jupyter\":{\"source_hidden\":true,\"outputs_hidden\":true}}\n    \n    print(f\"\\nANALYZING {stock}\\n\" + \"—\" * 60)\n    \n    # 1. Recent news\n    news = get_recent_news(stock)\n    print(\"Recent headlines:\")\n    for i, h in enumerate(news[:5], 1):\n        print(f\"   {i}. {h}\")\n    \n    # 2. Sentiment\n    scores = [sia.polarity_scores(h)['compound'] for h in news]\n    sentiment = np.mean(scores)\n    mood = \"BULLISH\" if sentiment > 0.05 else \"BEARISH\" if sentiment < -0.05 else \"NEUTRAL\"\n    print(f\"\\nSentiment → {sentiment:+.3f} → {mood}\")\n    \n    # 3. Similarity search\n    query_vec = embedder.encode([\" \".join(news)]).astype('float32')\n    norms = np.linalg.norm(embeddings, axis=1) * np.linalg.norm(query_vec)\n    sim = np.dot(embeddings, query_vec.T).flatten() / (norms + 1e-8)\n    top_idx = np.argsort(sim)[-10:][::-1]  # top 10\n    \n    changes = []\n    print(\"\\nTop similar historical events (with actual price change):\")\n    for idx in top_idx:\n        row = df_hist.iloc[idx]\n        try:\n            # SAFE yfinance call – this never throws \"delisted\" error\n            data = yf.download(ticker, \n                             start=row['date'], \n                             end=(pd.to_datetime(row['date']) + timedelta(days=15)).strftime('%Y-%m-%d'),\n                             progress=False,\n                             auto_adjust=True,\n                             actions=False,\n                             threads=False,\n                             timeout=10)\n            if len(data) >= 4:  # at least 4 trading days\n                pct = (data['Close'].iloc[-1] / data['Close'].iloc[0] - 1) * 100\n                changes.append(pct)\n                direction = \"UP\" if pct > 0 else \"DOWN\"\n                print(f\"   • {row['date'][:10]} | {direction} {pct:+5.1f}% | {row['text'][:80]}...\")\n        except:\n            continue  # silently skip any bad date/ticker\n    \n    # Final prediction\n    if not changes:\n        print(\"   (No matching historical price data found → using sentiment only)\")\n        final_move = sentiment * 12\n    else:\n        avg_change = np.mean(changes)\n        final_move = avg_change + sentiment * 10\n        print(f\"\\nHistorical average move from similar events: {avg_change:+.1f}%\")\n    \n    confidence = int(68 + abs(sentiment)*25)\n    \n    direction = \"UP\" if final_move > 0 else \"DOWN\"\n    \n    print(\"\\n\" + \"█\" * 70)\n    print(f\"FINAL PREDICTION → {stock}\")\n    print(f\"Expected 5-day move : {direction} {abs(final_move):.2f}%\")\n    print(f\"Confidence          : {confidence}%\")\n    print(\"█\" * 70)\n\n# Interactive widget (beautiful & working)\nimport ipywidgets as widgets\nfrom IPython.display import display, clear_output\n\ntxt = widgets.Text(value=\"RELIANCE\", description=\"Stock:\", placeholder=\"Try SBI, HDFCBANK, TCS...\")\nbtn = widgets.Button(description=\"Predict Now\", button_style=\"success\", layout=widgets.Layout(width='200px'))\nout = widgets.Output()\n\ndef run(b):\n    with out:\n        clear_output()\n        if txt.value.strip():\n            predict(txt.value.strip())\n\nbtn.on_click(run)\ndisplay(widgets.VBox([txt, btn, out]))\n\n# Quick test with popular stocks\nprint(\"Testing with SBI...\")\npredict(\"SBI\")\nprint(\"\\nTesting with TCS...\")\npredict(\"TCS\")","metadata":{"_uuid":"111afaf4-05d3-4eae-af47-fbfef9c10954","_cell_guid":"6bbe9b92-69ab-4b93-862c-9fbb19475000","trusted":true,"collapsed":false,"jupyter":{"outputs_hidden":false}},"outputs":[],"execution_count":null}]}
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import requests
+from bs4 import BeautifulSoup
+from sentence_transformers import SentenceTransformer
+from nltk.sentiment import SentimentIntensityAnalyzer
+import nltk
+
+nltk.download('vader_lexicon', quiet=True)
+sia = SentimentIntensityAnalyzer()
+
+st.set_page_config(page_title="Indian Stock Predictor", page_icon="📈", layout="centered")
+st.title("📈 Indian Stock Movement Predictor")
+st.markdown("Enter any NSE stock symbol and get a 5-day prediction based on latest news + historical similarity")
+
+@st.cache_resource
+def load_model():
+    return SentenceTransformer('all-MiniLM-L6-v2')
+embedder = load_model()
+
+# Upload the CSV when deploying (or commit to GitHub)
+@st.cache_data
+def load_data():
+    df = pd.read_csv("IndianFinancialNews.csv")  # This file must be in the same folder
+    df = df.dropna(subset=['Title']).copy()
+    df['Description'] = df['Title'].astype(str)
+    df['date'] = pd.to_datetime(df['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+    embeddings = embedder.encode(df['Description'].tolist(), batch_size=64)
+    return df, np.array(embeddings).astype('float32')
+
+df_hist, embeddings = load_data()
+
+stock = st.text_input("Enter Stock Symbol", value="RELIANCE", help="e.g., SBI, TCS, HDFCBANK, INFY").upper().strip()
+
+if st.button("Predict 5-Day Movement", type="primary"):
+    ticker = f"{stock}.NS"
+    
+    with st.spinner("Analyzing news & history..."):
+        # Recent news
+        def get_recent_news(s):
+            url = f"https://www.google.com/search?q={s}+stock+latest+news+site:moneycontrol.com+OR+site:economictimes.indiatimes.com+OR+site:livemint.com&tbm=nws"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            try:
+                r = requests.get(url, headers=headers, timeout=10)
+                soup = BeautifulSoup(r.text, 'html.parser')
+                headlines = [item.select_one('div[role="heading"]').get_text(strip=True) 
+                            for item in soup.select('div.SoaBEf')[:8] if item.select_one('div[role="heading"]')]
+                return headlines or ["No recent news found"]
+            except:
+                return ["News fetch failed"]
+        
+        news = get_recent_news(stock)
+        st.subheader("Recent News")
+        for h in news[:5]:
+            st.write("• " + h)
+
+        # Sentiment
+        scores = [sia.polarity_scores(h)['compound'] for h in news]
+        sentiment = np.mean(scores)
+        mood = "Bullish 🟢" if sentiment > 0.05 else "Bearish 🔴" if sentiment < -0.05 else "Neutral ⚪"
+        st.write(f"**Sentiment**: {mood} ({sentiment:+.3f})")
+
+        # Similarity
+        query_vec = embedder.encode([" ".join(news)]).astype('float32')
+        norms = np.linalg.norm(embeddings, axis=1) * np.linalg.norm(query_vec)
+        sim = np.dot(embeddings, query_vec.T).flatten() / (norms + 1e-8)
+        top_idx = np.argsort(sim)[-10:][::-1]
+
+        changes = []
+        st.subheader("Top Similar Past Events")
+        for idx in top_idx:
+            row = df_hist.iloc[idx]
+            try:
+                data = yf.download(ticker, start=row['date'], 
+                                 end=(pd.to_datetime(row['date'])+timedelta(days=15)).strftime('%Y-%m-%d'),
+                                 progress=False, auto_adjust=True, timeout=10)
+                if len(data) >= 4:
+                    pct = (data['Close'].iloc[-1]/data['Close'].iloc[0]-1)*100
+                    changes.append(pct)
+                    st.write(f"**{row['date'][:10]}** → **{pct:+.1f}%** | {row['Description'][:100]}...")
+            except:
+                continue
+
+        # Prediction
+        if changes:
+            avg_change = np.mean(changes)
+            final_move = avg_change + sentiment * 10
+        else:
+            final_move = sentiment * 12
+
+        confidence = int(68 + abs(sentiment)*25)
+        direction = "UP 🟢" if final_move > 0 else "DOWN 🔴"
+
+        color = "#d4edda" if final_move > 0 else "#f8d7da"
+        border = "#28a745" if final_move > 0 else "#dc3545"
+        st.markdown(f"""
+        <div style="background-color:{color}; padding:30px; border-radius:20px; text-align:center; border:4px solid {border}">
+            <h1>{direction} {abs(final_move):.1f}%</h1>
+            <h2>Expected 5-day move for {stock}</h2>
+            <p><strong>Confidence: {confidence}%</strong></p>
+        </div>
+        """, unsafe_allow_html=True)
+
+st.caption("Data: Indian Financial News (2003–2020) | Models: Sentence Transformers + VADER")
