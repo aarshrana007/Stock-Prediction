@@ -4,36 +4,39 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import requests
-from bs4 import BeautifulSoup
 from sentence_transformers import SentenceTransformer
 from nltk.sentiment import SentimentIntensityAnalyzer
 import nltk
+from io import StringIO
 
 nltk.download('vader_lexicon', quiet=True)
 sia = SentimentIntensityAnalyzer()
 
 st.set_page_config(page_title="Indian Stock Predictor", page_icon="📈", layout="centered")
 
-# Custom CSS
+# Custom CSS for beauty
 st.markdown("""
 <style>
     .big-font {font-size:50px !important; font-weight:bold; text-align:center;}
     .pred-up {background-color:#d4edda; padding:30px; border-radius:20px; border:4px solid #28a745; text-align:center;}
     .pred-down {background-color:#f8d7da; padding:30px; border-radius:20px; border:4px solid #dc3545; text-align:center;}
     .news-item {margin-bottom:12px; padding:12px; background-color:#f0f2f6; border-radius:10px;}
+    .market-box {padding:15px; border-radius:10px; text-align:center;}
 </style>
 """, unsafe_allow_html=True)
 
 st.title("📈 Indian Stock Movement Predictor")
-st.markdown("**AI-powered 5-day prediction using latest news sentiment + historical patterns**")
+st.markdown("**Real-time market + Your live GitHub news + Historical patterns**")
 
+# Load embedding model
 @st.cache_resource
 def load_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
 embedder = load_model()
 
+# Load historical data
 @st.cache_data
-def load_data():
+def load_historical():
     df = pd.read_csv("IndianFinancialNews.csv")
     df = df.dropna(subset=['Title']).copy()
     df['Description'] = df['Title'].astype(str)
@@ -41,46 +44,113 @@ def load_data():
     embeddings = embedder.encode(df['Description'].tolist(), batch_size=64)
     return df, np.array(embeddings).astype('float32')
 
-df_hist, embeddings = load_data()
+df_hist, hist_embeddings = load_historical()
 
-def get_recent_news(stock):
-    url = f"https://www.google.com/search?q={stock}+stock+latest+news+site:moneycontrol.com+OR+site:economictimes.indiatimes.com+OR+site:livemint.com&tbm=nws"
-    headers = {"User-Agent": "Mozilla/5.0"}
+# Load recent news from your GitHub
+@st.cache_data(ttl=1800)  # Refresh every 30 minutes
+def load_recent_news_from_github():
+    folder_url = "https://api.github.com/repos/aarshrana007/Stock_Analysis/contents/news_data"
     try:
-        r = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(r.text, 'html.parser')
-        headlines = [item.select_one('div[role="heading"]').get_text(strip=True) 
-                    for item in soup.select('div.SoaBEf')[:8] if item.select_one('div[role="heading"]')]
-        return headlines or ["No recent news found"]
-    except:
-        return ["News fetch failed"]
-
-stock = st.text_input("Enter NSE Stock Symbol", value="RELIANCE", placeholder="e.g., SBI, TCS, HDFCBANK").upper().strip()
-
-if st.button("🔮 Predict 5-Day Movement", type="primary"):
-    ticker = f"{stock}.NS"
-    
-    with st.spinner("Analyzing news & historical patterns..."):
-        news = get_recent_news(stock)
+        response = requests.get(folder_url)
+        if response.status_code != 200:
+            st.warning("Could not access GitHub recent news folder.")
+            return pd.DataFrame()
         
-        st.subheader("📰 Recent News")
-        for h in news[:5]:
-            st.markdown(f"<div class='news-item'>{h}</div>", unsafe_allow_html=True)
+        file_list = response.json()
+        dfs = []
+        for file in file_list:
+            if file['name'].endswith('.csv'):
+                csv_data = requests.get(file['download_url']).text
+                df = pd.read_csv(StringIO(csv_data))
+                if not df.empty:
+                    df['Description'] = (df.get('title', '') + " " + df.get('summary', '')).str.strip()
+                    df = df[df['Description'].str.len() > 20]
+                    if not df.empty:
+                        dfs.append(df)
+        
+        if dfs:
+            recent_df = pd.concat(dfs, ignore_index=True)
+            recent_df['date'] = pd.to_datetime(recent_df['published'], errors='coerce').dt.strftime('%Y-%m-%d')
+            recent_df = recent_df.dropna(subset=['date'])
+            return recent_df[['Description', 'title', 'link', 'date', 'source']]
+    except Exception as e:
+        st.error(f"Error loading recent news: {e}")
+    return pd.DataFrame()
 
-        scores = [sia.polarity_scores(h)['compound'] for h in news]
+recent_news_df = load_recent_news_from_github()
+
+# Combine embeddings
+if not recent_news_df.empty:
+    recent_emb = embedder.encode(recent_news_df['Description'].tolist(), batch_size=64)
+    recent_emb = np.array(recent_emb).astype('float32')
+    embeddings = np.vstack([hist_embeddings, recent_emb])
+    df_combined = pd.concat([df_hist, recent_news_df[['Description', 'date']]], ignore_index=True)
+    st.success(f"Loaded {len(recent_news_df)} recent news items from your GitHub!")
+else:
+    embeddings = hist_embeddings
+    df_combined = df_hist
+    st.info("Using historical data only (no recent GitHub news)")
+
+# Real-Time Market Snapshot
+st.subheader("📊 Real-Time Market Snapshot")
+try:
+    nifty = yf.Ticker("^NSEI").info
+    sensex = yf.Ticker("^BSESN").info
+    n_price = nifty.get('regularMarketPrice', 'N/A')
+    n_change = nifty.get('regularMarketChangePercent', 0)
+    s_price = sensex.get('regularMarketPrice', 'N/A')
+    s_change = sensex.get('regularMarketChangePercent', 0)
+except:
+    n_price, n_change = "N/A", 0
+    s_price, s_change = "N/A", 0
+
+col1, col2 = st.columns(2)
+with col1:
+    color = "#d4edda" if n_change > 0 else "#f8d7da"
+    st.markdown(f"<div class='market-box' style='background-color:{color}'>"
+                f"<h3>Nifty 50</h3><h2>{n_price}</h2><p>{n_change:+.2f}%</p></div>", unsafe_allow_html=True)
+with col2:
+    color = "#d4edda" if s_change > 0 else "#f8d7da"
+    st.markdown(f"<div class='market-box' style='background-color:{color}'>"
+                f"<h3>Sensex</h3><h2>{s_price}</h2><p>{s_change:+.2f}%</p></div>", unsafe_allow_html=True)
+
+# Top 10 Latest News from GitHub
+st.subheader("📰 Top 10 Latest Financial News (Your GitHub Feed)")
+if not recent_news_df.empty:
+    latest = recent_news_df.sort_values(by='date', ascending=False).head(10)
+    for _, row in latest.iterrows():
+        st.markdown(f"<div class='news-item'><strong>{row['date']}</strong>: {row['Description']}</div>", unsafe_allow_html=True)
+else:
+    st.info("No recent news from GitHub")
+
+st.markdown("---")
+
+# Stock Predictor
+st.markdown("### 🔮 Predict Any NSE Stock")
+stock = st.text_input("Enter Stock Symbol", value="RELIANCE", placeholder="e.g., SBI, TCS").upper().strip()
+
+if st.button("Predict 5-Day Movement", type="primary"):
+    ticker = f"{stock}.NS"
+    with st.spinner("Analyzing..."):
+        # Use recent news for sentiment
+        if not recent_news_df.empty:
+            news_texts = recent_news_df['Description'].tolist()
+        else:
+            news_texts = df_combined['Description'].sample(20).tolist()
+        
+        scores = [sia.polarity_scores(t)['compound'] for t in news_texts]
         sentiment = np.mean(scores)
         mood = "Bullish 🟢" if sentiment > 0.05 else "Bearish 🔴" if sentiment < -0.05 else "Neutral ⚪"
         st.write(f"**Sentiment**: {mood} ({sentiment:+.3f})")
 
-        query_vec = embedder.encode([" ".join(news)]).astype('float32')
-        norms = np.linalg.norm(embeddings, axis=1) * np.linalg.norm(query_vec)
-        sim = np.dot(embeddings, query_vec.T).flatten() / (norms + 1e-8)
+        query_vec = embedder.encode([" ".join(news_texts[:50])]).astype('float32')
+        sim = np.dot(embeddings, query_vec.T).flatten() / (np.linalg.norm(embeddings, axis=1) * np.linalg.norm(query_vec) + 1e-8)
         top_idx = np.argsort(sim)[-10:][::-1]
 
         changes = []
         st.subheader("📊 Top Similar Historical Events")
         for idx in top_idx:
-            row = df_hist.iloc[idx]
+            row = df_combined.iloc[idx]
             try:
                 data = yf.download(ticker, start=row['date'], 
                                  end=(pd.to_datetime(row['date']) + timedelta(days=15)).strftime('%Y-%m-%d'),
@@ -101,4 +171,4 @@ if st.button("🔮 Predict 5-Day Movement", type="primary"):
                     f'<h2>Expected 5-day move for {stock}</h2>'
                     f'<p><strong>Confidence: {confidence}%</strong></p></div>', unsafe_allow_html=True)
 
-st.caption("Data: Indian Financial News (2003–2020) • Models: Sentence Transformers + VADER • Real-time News via Google")
+st.caption("Your live GitHub news feed + Historical data + AI prediction")
