@@ -1,3 +1,7 @@
+# =========================================================
+# 📈 INDIAN STOCK BUY / SELL SIGNAL APP (PRODUCTION STYLE)
+# =========================================================
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -8,170 +12,223 @@ from sentence_transformers import SentenceTransformer
 from nltk.sentiment import SentimentIntensityAnalyzer
 import nltk
 from io import StringIO
+import re
 
-nltk.download('vader_lexicon', quiet=True)
+# ---------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------
+st.set_page_config(page_title="Indian Stock Signal App", page_icon="📈", layout="centered")
+nltk.download("vader_lexicon", quiet=True)
 sia = SentimentIntensityAnalyzer()
 
-st.set_page_config(page_title="Indian Stock Predictor", page_icon="📈", layout="centered")
-
-# Custom CSS
+# ---------------------------------------------------------
+# STYLING
+# ---------------------------------------------------------
 st.markdown("""
 <style>
-    .big-font {font-size:50px !important; font-weight:bold; text-align:center;}
-    .pred-up {background-color:#d4edda; padding:30px; border-radius:20px; border:4px solid #28a745; text-align:center;}
-    .pred-down {background-color:#f8d7da; padding:30px; border-radius:20px; border:4px solid #dc3545; text-align:center;}
-    .news-item {margin-bottom:12px; padding:12px; background-color:#f0f2f6; border-radius:10px;}
-    .market-box {padding:15px; border-radius:10px; text-align:center;}
+.big-font {font-size:42px; font-weight:bold; text-align:center;}
+.signal-buy {background:#d4edda; padding:25px; border-radius:16px; border:3px solid #28a745;}
+.signal-sell {background:#f8d7da; padding:25px; border-radius:16px; border:3px solid #dc3545;}
+.signal-hold {background:#fff3cd; padding:25px; border-radius:16px; border:3px solid #ffc107;}
+.news-item {margin-bottom:10px; padding:10px; background:#f0f2f6; border-radius:10px;}
+.market-box {padding:15px; border-radius:12px; text-align:center;}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📈 Indian Stock Movement Predictor")
-st.markdown("**Real-time market + Your private GitHub news feed + Historical patterns**")
+st.title("📈 Indian Stock Buy / Sell Signal")
+st.caption("News + Historical Similarity + Price Trend (Explainable AI)")
 
+# ---------------------------------------------------------
+# LOAD EMBEDDING MODEL
+# ---------------------------------------------------------
 @st.cache_resource
-def load_model():
-    return SentenceTransformer('all-MiniLM-L6-v2')
-embedder = load_model()
+def load_embedder():
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
+embedder = load_embedder()
+
+# ---------------------------------------------------------
+# LOAD HISTORICAL NEWS DATA
+# ---------------------------------------------------------
 @st.cache_data
-def load_historical():
+def load_historical_news():
     df = pd.read_csv("IndianFinancialNews.csv")
-    df = df.dropna(subset=['Title']).copy()
-    df['Description'] = df['Title'].astype(str)
-    df['date'] = pd.to_datetime(df['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
-    embeddings = embedder.encode(df['Description'].tolist(), batch_size=64)
-    return df, np.array(embeddings).astype('float32')
+    df = df.dropna(subset=["Title"]).copy()
+    df["Description"] = df["Title"].astype(str)
+    df["date"] = pd.to_datetime(df["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    emb = embedder.encode(df["Description"].tolist(), batch_size=64)
+    return df, np.array(emb).astype("float32")
 
-df_hist, hist_embeddings = load_historical()
+df_hist, hist_embeddings = load_historical_news()
 
-# Load recent news from PRIVATE GitHub repo using token from secrets
+# ---------------------------------------------------------
+# LOAD RECENT NEWS FROM PRIVATE GITHUB
+# ---------------------------------------------------------
 @st.cache_data(ttl=1800)
-def load_recent_news_from_github():
+def load_recent_news():
     token = st.secrets.get("GITHUB_TOKEN")
     if not token:
-        st.error("GITHUB_TOKEN not found in secrets! Add it in app settings.")
         return pd.DataFrame()
-    
-    headers = {'Authorization': f'token {token}'}
+
+    headers = {"Authorization": f"token {token}"}
     folder_url = "https://api.github.com/repos/aarshrana007/Stock_Analysis/contents/news_data"
-    
-    try:
-        response = requests.get(folder_url, headers=headers)
-        if response.status_code != 200:
-            st.warning(f"GitHub access failed: {response.status_code}. Check token permissions.")
-            return pd.DataFrame()
-        
-        file_list = response.json()
-        dfs = []
-        for file in file_list:
-            if file['name'].endswith('.csv'):
-                csv_data = requests.get(file['download_url'], headers=headers).text
-                df = pd.read_csv(StringIO(csv_data))
-                if not df.empty:
-                    df['Description'] = (df.get('title', '') + " " + df.get('summary', '')).str.strip()
-                    df = df[df['Description'].str.len() > 20]
-                    if not df.empty:
-                        dfs.append(df)
-        
-        if dfs:
-            recent_df = pd.concat(dfs, ignore_index=True)
-            recent_df['date'] = pd.to_datetime(recent_df['published'], errors='coerce').dt.strftime('%Y-%m-%d')
-            recent_df = recent_df.dropna(subset=['date'])
-            return recent_df[['Description', 'title', 'link', 'date', 'source']]
-    except Exception as e:
-        st.error(f"Error loading news: {e}")
-    return pd.DataFrame()
 
-recent_news_df = load_recent_news_from_github()
+    response = requests.get(folder_url, headers=headers)
+    if response.status_code != 200:
+        return pd.DataFrame()
 
-# Combine
+    dfs = []
+    for file in response.json():
+        if file["name"].endswith(".csv"):
+            csv_text = requests.get(file["download_url"], headers=headers).text
+            df = pd.read_csv(StringIO(csv_text))
+            if not df.empty:
+                df["Description"] = (df.get("title", "") + " " + df.get("summary", "")).str.strip()
+                df = df[df["Description"].str.len() > 20]
+                dfs.append(df)
+
+    if not dfs:
+        return pd.DataFrame()
+
+    recent_df = pd.concat(dfs, ignore_index=True)
+    return recent_df
+
+recent_news_df = load_recent_news()
+
+# ---------------------------------------------------------
+# 🔧 DATA CLEANING: DATE FIX (YOUR LOGIC – PROFESSIONALIZED)
+# ---------------------------------------------------------
 if not recent_news_df.empty:
-    recent_emb = embedder.encode(recent_news_df['Description'].tolist(), batch_size=64)
-    recent_emb = np.array(recent_emb).astype('float32')
-    embeddings = np.vstack([hist_embeddings, recent_emb])
-    df_combined = pd.concat([df_hist, recent_news_df[['Description', 'date']]], ignore_index=True)
-    st.success(f"Loaded {len(recent_news_df)} recent news items from your private repo!")
+    recent_news_df["date"] = recent_news_df.get("date", "Unknown")
+
+    def extract_date_from_published(published):
+        if pd.isna(published) or str(published).strip() == "":
+            return None
+        parsed = pd.to_datetime(published, errors="coerce")
+        if pd.notna(parsed):
+            return parsed.strftime("%Y-%m-%d")
+        match = re.search(r"\d{4}-\d{2}-\d{2}", str(published))
+        return match.group(0) if match else None
+
+    unknown_mask = (
+        recent_news_df["date"].isna() |
+        (recent_news_df["date"] == "Unknown") |
+        (recent_news_df["date"].astype(str).str.strip() == "")
+    )
+
+    extracted = recent_news_df.loc[unknown_mask, "published_ist"].apply(extract_date_from_published)
+    recent_news_df.loc[unknown_mask & extracted.notna(), "date"] = extracted
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    recent_news_df.loc[
+        recent_news_df["date"].isna() | (recent_news_df["date"] == "Unknown"),
+        "date"
+    ] = today
+
+    recent_news_df["date"] = pd.to_datetime(recent_news_df["date"]).dt.strftime("%Y-%m-%d")
+
+# ---------------------------------------------------------
+# COMBINE DATASETS
+# ---------------------------------------------------------
+if not recent_news_df.empty:
+    recent_emb = embedder.encode(recent_news_df["Description"].tolist(), batch_size=64)
+    embeddings = np.vstack([hist_embeddings, recent_emb.astype("float32")])
+    df_combined = pd.concat([df_hist, recent_news_df[["Description", "date"]]], ignore_index=True)
 else:
     embeddings = hist_embeddings
     df_combined = df_hist
-    st.info("Using historical data only")
 
-# Real-Time Market Snapshot
-st.subheader("📊 Real-Time Market Snapshot")
+# ---------------------------------------------------------
+# MARKET SNAPSHOT
+# ---------------------------------------------------------
+st.subheader("📊 Market Snapshot")
 try:
     nifty = yf.Ticker("^NSEI").info
     sensex = yf.Ticker("^BSESN").info
-    n_price = nifty.get('regularMarketPrice', 'N/A')
-    n_change = nifty.get('regularMarketChangePercent', 0)
-    s_price = sensex.get('regularMarketPrice', 'N/A')
-    s_change = sensex.get('regularMarketChangePercent', 0)
+    n_price, n_chg = nifty["regularMarketPrice"], nifty["regularMarketChangePercent"]
+    s_price, s_chg = sensex["regularMarketPrice"], sensex["regularMarketChangePercent"]
 except:
-    n_price, n_change = "N/A", 0
-    s_price, s_change = "N/A", 0
+    n_price = n_chg = s_price = s_chg = "N/A"
 
-col1, col2 = st.columns(2)
-with col1:
-    color = "#d4edda" if n_change > 0 else "#f8d7da"
-    st.markdown(f"<div class='market-box' style='background-color:{color}'>"
-                f"<h3>Nifty 50</h3><h2>{n_price}</h2><p>{n_change:+.2f}%</p></div>", unsafe_allow_html=True)
-with col2:
-    color = "#d4edda" if s_change > 0 else "#f8d7da"
-    st.markdown(f"<div class='market-box' style='background-color:{color}'>"
-                f"<h3>Sensex</h3><h2>{s_price}</h2><p>{s_change:+.2f}%</p></div>", unsafe_allow_html=True)
+c1, c2 = st.columns(2)
+c1.markdown(f"<div class='market-box'>{n_price}<br>Nifty ({n_chg:+.2f}%)</div>", unsafe_allow_html=True)
+c2.markdown(f"<div class='market-box'>{s_price}<br>Sensex ({s_chg:+.2f}%)</div>", unsafe_allow_html=True)
 
-# Top 10 Latest News
-st.subheader("📰 Top 10 Latest Financial News (Your Private Feed)")
-if not recent_news_df.empty:
-    latest = recent_news_df.sort_values(by='date', ascending=False).head(10)
-    for _, row in latest.iterrows():
-        st.markdown(f"<div class='news-item'><strong>{row['date']}</strong>: {row['Description']}</div>", unsafe_allow_html=True)
-else:
-    st.info("No recent news loaded")
+# ---------------------------------------------------------
+# CORE ANALYTICS FUNCTIONS
+# ---------------------------------------------------------
+def compute_sentiment(texts):
+    scores = [sia.polarity_scores(t)["compound"] for t in texts[:40]]
+    avg = np.mean(scores) if scores else 0
+    label = "Bullish 🟢" if avg > 0.15 else "Bearish 🔴" if avg < -0.15 else "Neutral ⚪"
+    return avg, label
 
+def technical_trend(symbol):
+    df = yf.download(f"{symbol}.NS", period="6mo", progress=False)
+    if len(df) < 50:
+        return "Neutral ⚪"
+    df["MA20"] = df["Close"].rolling(20).mean()
+    df["MA50"] = df["Close"].rolling(50).mean()
+    return "Bullish 🟢" if df["MA20"].iloc[-1] > df["MA50"].iloc[-1] else "Bearish 🔴"
+
+def historical_reaction(symbol, query_vec):
+    sim = np.dot(embeddings, query_vec.T).flatten()
+    top_idx = np.argsort(sim)[-8:]
+    moves = []
+
+    for idx in top_idx:
+        row = df_combined.iloc[idx]
+        try:
+            data = yf.download(
+                f"{symbol}.NS",
+                start=row["date"],
+                end=(pd.to_datetime(row["date"]) + timedelta(days=7)).strftime("%Y-%m-%d"),
+                progress=False
+            )
+            if len(data) > 2:
+                moves.append((data["Close"].iloc[-1] / data["Close"].iloc[0]) - 1)
+        except:
+            continue
+
+    if not moves:
+        return "Neutral ⚪"
+    avg = np.mean(moves)
+    return "Bullish 🟢" if avg > 0.01 else "Bearish 🔴"
+
+def final_signal(sent, tech, hist):
+    if sent > 0.2 and tech == hist == "Bullish 🟢":
+        return "BUY 🟢", 78
+    if sent < -0.2 and tech == hist == "Bearish 🔴":
+        return "SELL 🔴", 78
+    return "HOLD ⚪", 62
+
+# ---------------------------------------------------------
+# UI: PREDICTOR
+# ---------------------------------------------------------
 st.markdown("---")
+stock = st.text_input("Enter NSE Stock Symbol", "SBI").upper()
 
-# Predictor (same as before)
-stock = st.text_input("Enter Stock Symbol", value="RELIANCE").upper().strip()
-
-if st.button("Predict 5-Day Movement", type="primary"):
-    ticker = f"{stock}.NS"
+if st.button("Generate Trade Signal"):
     with st.spinner("Analyzing..."):
-        if not recent_news_df.empty:
-            news_texts = recent_news_df['Description'].tolist()
-        else:
-            news_texts = df_combined['Description'].sample(20).tolist()
-        
-        scores = [sia.polarity_scores(t)['compound'] for t in news_texts]
-        sentiment = np.mean(scores)
-        mood = "Bullish 🟢" if sentiment > 0.05 else "Bearish 🔴" if sentiment < -0.05 else "Neutral ⚪"
-        st.write(f"**Sentiment**: {mood} ({sentiment:+.3f})")
+        texts = recent_news_df["Description"].tolist() if not recent_news_df.empty else df_combined["Description"].sample(30).tolist()
 
-        query_vec = embedder.encode([" ".join(news_texts[:50])]).astype('float32')
-        sim = np.dot(embeddings, query_vec.T).flatten() / (np.linalg.norm(embeddings, axis=1) * np.linalg.norm(query_vec) + 1e-8)
-        top_idx = np.argsort(sim)[-10:][::-1]
+        sent_score, sent_label = compute_sentiment(texts)
+        tech = technical_trend(stock)
+        query_vec = embedder.encode([" ".join(texts[:40])]).astype("float32")
+        hist = historical_reaction(stock, query_vec)
 
-        changes = []
-        st.subheader("📊 Top Similar Historical Events")
-        for idx in top_idx:
-            row = df_combined.iloc[idx]
-            try:
-                data = yf.download(ticker, start=row['date'], 
-                                 end=(pd.to_datetime(row['date']) + timedelta(days=15)).strftime('%Y-%m-%d'),
-                                 progress=False, auto_adjust=True, timeout=10)
-                if len(data) >= 4:
-                    pct = (data['Close'].iloc[-1] / data['Close'].iloc[0] - 1) * 100
-                    changes.append(pct)
-                    st.write(f"**{row['date'][:10]}** → **{pct:+.1f}%** | {row['Description'][:100]}...")
-            except:
-                continue
+        signal, confidence = final_signal(sent_score, tech, hist)
 
-        final_move = np.mean(changes) + sentiment * 10 if changes else sentiment * 12
-        confidence = int(68 + abs(sentiment)*25)
-        direction = "UP 🟢" if final_move > 0 else "DOWN 🔴"
-        pred_class = "pred-up" if final_move > 0 else "pred-down"
+        css = "signal-buy" if "BUY" in signal else "signal-sell" if "SELL" in signal else "signal-hold"
 
-        st.markdown(f'<div class="{pred_class}"><div class="big-font">{direction} {abs(final_move):.1f}%</div>'
-                    f'<h2>Expected 5-day move for {stock}</h2>'
-                    f'<p><strong>Confidence: {confidence}%</strong></p></div>', unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="{css}">
+            <div class="big-font">{signal}</div>
+            <p><strong>Confidence:</strong> {confidence}%</p>
+            <p>📰 News Sentiment: {sent_label}</p>
+            <p>📈 Price Trend: {tech}</p>
+            <p>📊 Past Events: {hist}</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-st.caption("Your private GitHub news feed + Historical data + AI prediction")
+st.caption("Educational use only — not financial advice")
